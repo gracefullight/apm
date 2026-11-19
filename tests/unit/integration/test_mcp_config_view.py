@@ -16,6 +16,8 @@ from apm_cli.integration.mcp_config_view import (
 )
 from apm_cli.models.apm_package import APMPackage, clear_apm_yml_cache
 from apm_cli.models.dependency.mcp import MCPDependency
+from apm_cli.security.executables import build_exec_trust_context, locked_dependency_approval_keys
+from apm_cli.security.trust import McpAdmission
 from tests.unit.copilot_plugins._builders import write_agent_plugin
 from tests.utils.artifact_snapshot import ArtifactSnapshot, assert_unchanged
 
@@ -40,7 +42,7 @@ def test_dependency_omission_requires_bound_selection_evidence(
         root,
         lock,
         modules,
-        trust_transitive_self_defined=False,
+        admission=McpAdmission(None),
         include_dependency_mcp=include_dependency_mcp,
     )
     assert selected.dependencies == ()
@@ -78,10 +80,14 @@ def test_unapproved_executables_omission_binds_gated_declaration(
     )
     lock = _lock(dependency)
     modules = tmp_path / "apm_modules"
-    view = _derive(root, lock, modules)
-    parked = view.with_unapproved_executables(view.dependencies if approved else ())
-    assert ("tools" in parked.omission_evidence(lock)) is omitted
-    assert ("tools" in parked.configs) is not omitted
+    identity = locked_dependency_approval_keys(dependency)[0].split("#", 1)[0]
+    allow = {identity: {"mcp": True}} if approved else {}
+    ctx = build_exec_trust_context(
+        policy=None, project_data={"executables": {"allow": allow}}, include_user=False
+    )
+    view = CurrentMcpConfigView.derive(root, lock, modules, admission=McpAdmission(ctx))
+    assert ("tools" in view.omission_evidence(lock)) is omitted
+    assert ("tools" in view.configs) is not omitted
 
     lock.mcp_omissions = {
         "tools": {
@@ -124,7 +130,7 @@ def test_omission_never_masks_unknown_or_previously_admitted_state(
     lock = _lock(dependency)
     modules = tmp_path / "apm_modules"
     selected = CurrentMcpConfigView.derive(
-        root, lock, modules, trust_transitive_self_defined=False, include_dependency_mcp=False
+        root, lock, modules, admission=McpAdmission(None), include_dependency_mcp=False
     )
     lock.mcp_omissions = selected.omission_evidence(lock)
     if damage == "lost":
@@ -170,7 +176,7 @@ def test_admitted_config_supersedes_obsolete_omission(tmp_path: Path, root_decla
     )
     modules = tmp_path / "apm_modules"
     selected = CurrentMcpConfigView.derive(
-        root, lock, modules, trust_transitive_self_defined=False, include_dependency_mcp=False
+        root, lock, modules, admission=McpAdmission(None), include_dependency_mcp=False
     )
     lock.mcp_omissions = selected.omission_evidence(lock)
     assert set(lock.mcp_omissions) == {"firebase"}
@@ -214,7 +220,7 @@ def test_omission_fingerprint_uses_authored_portable_declaration(
     _write_manifest(source, name="firebase", mcp=[declaration])
     _write_manifest(replay_source, name="firebase", mcp=[declaration])
     selected = CurrentMcpConfigView.derive(
-        root, lock, installed, trust_transitive_self_defined=False, include_dependency_mcp=False
+        root, lock, installed, admission=McpAdmission(None), include_dependency_mcp=False
     )
     lock.mcp_omissions = selected.omission_evidence(lock)
     assert set(lock.mcp_omissions) == {"firebase"}
@@ -232,7 +238,7 @@ def test_omission_fingerprint_uses_authored_portable_declaration(
     declaration[field] = [literal] if field == "args" else {"SCRIPT": literal}
     _write_manifest(source, name="firebase", mcp=[declaration])
     selected = CurrentMcpConfigView.derive(
-        root, lock, installed, trust_transitive_self_defined=False, include_dependency_mcp=False
+        root, lock, installed, admission=McpAdmission(None), include_dependency_mcp=False
     )
     lock.mcp_omissions = selected.omission_evidence(lock)
     other_literal = str(replay_source.resolve() / "start.mjs")
@@ -264,7 +270,7 @@ def test_pending_sources_preserve_known_omission_evidence(tmp_path: Path) -> Non
         root,
         lock,
         tmp_path / "apm_modules",
-        trust_transitive_self_defined=False,
+        admission=McpAdmission(None),
         include_dependency_mcp=False,
         allow_pending=True,
         active_package_keys=frozenset(lock.dependencies),
@@ -320,7 +326,7 @@ def test_omission_and_compat_views_preserve_nested_single_file_admission(
         root,
         lock,
         modules,
-        trust_transitive_self_defined=False,
+        admission=McpAdmission(None),
         include_dependency_mcp=include_dependency_mcp,
         allow_pending=False,
     )
@@ -413,7 +419,7 @@ def _derive(
         root,
         lockfile,
         modules_root,
-        trust_transitive_self_defined=True,
+        admission=McpAdmission(None, one_off=True),
     )
 
 
@@ -1177,7 +1183,7 @@ def test_transitive_self_defined_trust_matches_install_behavior(tmp_path: Path) 
         root,
         lockfile,
         tmp_path / "apm_modules",
-        trust_transitive_self_defined=False,
+        admission=McpAdmission(None),
     )
     trusted = _derive(root, lockfile, tmp_path / "apm_modules")
 
@@ -1205,13 +1211,13 @@ def test_transitive_self_defined_server_needs_per_run_trust(tmp_path: Path) -> N
         root,
         _lock(deep),
         tmp_path / "apm_modules",
-        trust_transitive_self_defined=False,
+        admission=McpAdmission(None),
     )
     trusted = CurrentMcpConfigView.derive(
         root,
         _lock(deep),
         tmp_path / "apm_modules",
-        trust_transitive_self_defined=True,
+        admission=McpAdmission(None, one_off=True),
     )
 
     assert untrusted.dependencies == ()
@@ -1391,7 +1397,7 @@ def test_cold_cache_exemption_emits_verbose_trace(
         root,
         _lock(locked),
         modules_root,
-        trust_transitive_self_defined=True,
+        admission=McpAdmission(None, one_off=True),
         logger=logger,
     )
 
@@ -1500,7 +1506,7 @@ def test_local_claude_plugin_without_synthesized_manifest_warns(tmp_path: Path) 
         root,
         _local_plugin_lock("./plug"),
         modules,
-        trust_transitive_self_defined=True,
+        admission=McpAdmission(None, one_off=True),
         logger=logger,
     )
 
@@ -1579,7 +1585,7 @@ def test_missing_local_plugin_manifest_is_pending_only_for_restorable_preflight(
         root,
         _local_plugin_lock("./plug"),
         modules,
-        trust_transitive_self_defined=True,
+        admission=McpAdmission(None, one_off=True),
         logger=logger,
         allow_pending=allow_pending,
     )

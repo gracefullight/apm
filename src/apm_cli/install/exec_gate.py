@@ -55,9 +55,12 @@ def check_executable_approval(
     if name_blind not in candidate_keys:
         candidate_keys.append(name_blind)
 
+    from apm_cli.security.trust import hooks_package_admissible
+
+    # Pinned hook items admit per file at the source plan (hook_file_admission).
     hooks_ok = any(
         is_package_approved(allow_executables, k, EXEC_TYPE_HOOKS) for k in candidate_keys
-    )
+    ) or hooks_package_admissible(allow_executables, tuple(candidate_keys))
     bin_ok = any(is_package_approved(allow_executables, k, EXEC_TYPE_BIN) for k in candidate_keys)
     mcp_ok = any(is_package_approved(allow_executables, k, EXEC_TYPE_MCP) for k in candidate_keys)
     canvas_ok = any(
@@ -77,28 +80,68 @@ def check_executable_approval(
     blocked = not all(approved.values())
     needs_status = ctx is not None and getattr(ctx, "exec_trust_ctx", None) is not None
     if ctx is not None and (blocked or needs_status):
+        from dataclasses import replace
+
         from apm_cli.security.executables import scan_package_executables
 
         _install = Path(package_info.install_path)
-        _decl = scan_package_executables(
+        _decl = replace(
+            scan_package_executables(
+                _install,
+                package_name,
+                "",
+                approval_identity=pkg_key,
+            ),
+            install_path=str(_install),
+        )
+        from apm_cli.security.trust import pinned_exec_status
+
+        pinned_status = pinned_exec_status(
+            getattr(allow_executables, "trust_context", None),
+            tuple(candidate_keys),
             _install,
-            package_name,
-            "",
-            approval_identity=pkg_key,
+            _decl.exec_types,
         )
         # Only a declared type that stays unapproved parks the package.
-        if any(not approved[t] for t in _decl.exec_types):
+        if any(not approved[t] for t in _decl.exec_types if t not in pinned_status) or any(
+            status != "deployed" for status in pinned_status.values()
+        ):
             ctx.blocked_executables.append(_decl)
         if _decl.has_executables and needs_status:
-            from apm_cli.security.executables import exec_status_for_declaration
+            from apm_cli.security.executables import (
+                exec_status_for_declaration,
+                more_severe_exec_status,
+            )
 
             status = exec_status_for_declaration(
-                ctx.exec_trust_ctx, candidate_keys, _decl.exec_types
+                ctx.exec_trust_ctx,
+                candidate_keys,
+                tuple(t for t in _decl.exec_types if t not in pinned_status),
             )
+            for pinned in pinned_status.values():
+                status = more_severe_exec_status(status, pinned)
             if status is not None:
                 ctx.package_exec_status[package_name] = status
 
     return hooks_ok, bin_ok, mcp_ok, canvas_ok, lsp_ok
+
+
+def hook_file_admission(
+    package_name: str,
+    package_info: Any,
+    allow_executables: builtins.dict[str, builtins.dict[str, bool]] | None,
+):
+    """Return the per-hook-file admission predicate for pinned hook grants.
+
+    ``None`` means every hook file follows the package-level decision.
+    """
+    if package_name == "_local" or allow_executables is None:
+        return None
+    from apm_cli.security.trust import hook_file_filter
+
+    pkg_key = resolve_package_key(package_info, package_name)
+    keys = tuple(dict.fromkeys((pkg_key, pkg_key.split("#", 1)[0])))
+    return hook_file_filter(allow_executables, keys, Path(package_info.install_path))
 
 
 def resolve_package_key(package_info: Any, package_name: str) -> str:

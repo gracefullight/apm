@@ -526,6 +526,7 @@ def _check_config_consistency(
     """Verify MCP server configs match lockfile baseline."""
     from ..constants import APM_MODULES_DIR
     from ..integration.mcp_config_view import CurrentMcpConfigView
+    from ..security.trust import McpAdmission
 
     project_root = manifest.package_path or Path.cwd()
     if prepared_replay_error is not None:
@@ -541,13 +542,40 @@ def _check_config_consistency(
         prepared_replay.modules_root
         if prepared_replay is not None
         else project_root / APM_MODULES_DIR,
-        trust_transitive_self_defined=True,
+        # Consent is re-evaluated from apm.yml and org policy, never from the
+        # lockfile or personal config, so CI and laptops reach one verdict.
+        admission=McpAdmission.for_project(
+            project_root, include_user=False, cache_only_policy=True
+        ),
     ).with_recorded_omissions(lock)
     stored_configs = lock.mcp_configs or {}
     diff = view.diff(stored_configs)
 
+    # A server parked because its definition changed since approval stays
+    # visible in a passing audit (for example after a bot bumps a ref).
+    changed = sorted(
+        name
+        for name, evidence in (lock.mcp_omissions or {}).items()
+        if isinstance(evidence, dict) and evidence.get("reason") == "definition-changed"
+    )
+    changed_notice = (
+        CheckResult(
+            name="config-consistency",
+            passed=True,
+            message=(
+                f"MCP configs match lockfile baseline; {len(changed)} server(s) parked "
+                "because the definition changed since approval: "
+                f"{', '.join(changed)}. Review: apm approve --pending"
+            ),
+        )
+        if changed
+        else None
+    )
+
     # No MCP deps at all -- nothing to check
     if not view.configs and not stored_configs and not view.problems:
+        if changed_notice is not None:
+            return changed_notice
         return CheckResult(
             name="config-consistency",
             passed=True,
@@ -571,6 +599,8 @@ def _check_config_consistency(
         details.append(f"{name}: in manifest but not in lockfile")
 
     if not details:
+        if changed_notice is not None:
+            return changed_notice
         return CheckResult(
             name="config-consistency",
             passed=True,

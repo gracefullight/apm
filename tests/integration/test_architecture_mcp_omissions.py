@@ -42,8 +42,8 @@ def test_mcp_omission_owner_routes_are_intact() -> None:
         ),
         (
             "src/apm_cli/install/mcp/integration.py",
-            "current_view = current_view.with_unapproved_executables(approved)",
-            "pass",
+            "            admission=admission,\n",
+            "            admission=McpAdmission(None, one_off=True),\n",
         ),
         (
             "src/apm_cli/install/mcp/integration.py",
@@ -51,9 +51,9 @@ def test_mcp_omission_owner_routes_are_intact() -> None:
             "omissions = dict(prepared.omission_view.omissions)",
         ),
         (
-            "src/apm_cli/install/mcp/integration.py",
-            "if any(is_executable_gated_mcp(dep) for dep in mcp_deps):",
-            "if any(dep.resolved_by is not None and dep.is_self_defined for dep in mcp_deps):",
+            "src/apm_cli/integration/mcp_config_view.py",
+            "            verdict = admission.admit(subject)\n",
+            "            verdict = admission.admit(replace(subject, exec_gated=False))\n",
         ),
     ],
 )

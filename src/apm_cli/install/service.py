@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from apm_cli.models.apm_package import APMPackage
     from apm_cli.models.dependency.reference import DependencyReference
     from apm_cli.models.results import InstallResult
+    from apm_cli.security.trust import McpAdmission
 
 
 class InstallNotAvailableError(RuntimeError):
@@ -418,12 +419,21 @@ class InstallService:
         manifest_deps = project_manifest_dependencies(request.apm_package, modules_dir=modules_dir)
         satisfied, reasons = lockfile_satisfies_manifest(lockfile, manifest_deps)
 
+        from apm_cli.security.trust import McpAdmission
+
+        # Same admission inputs as install, so a gate-parked or approved server
+        # reaches the same verdict frozen or not (#3893, #3902).
+        admission = McpAdmission.for_project(
+            request.apm_package.package_path or lockfile_path.parent,
+            one_off=request.trust_transitive_mcp,
+            no_policy=request.no_policy,
+        )
         reasons.extend(
             InstallService._frozen_mcp_reasons(
                 request.apm_package,
                 lockfile,
                 modules_dir,
-                trust_transitive_mcp=request.trust_transitive_mcp,
+                admission=admission,
                 logger=request.logger,
                 allow_pending=allow_pending_mcp,
             )
@@ -593,7 +603,7 @@ class InstallService:
         lockfile: LockFile,
         modules_dir: Path,
         *,
-        trust_transitive_mcp: bool,
+        admission: McpAdmission,
         logger: InstallLogger | None,
         allow_pending: bool,
         active_package_keys: frozenset[str] | None = None,
@@ -609,7 +619,7 @@ class InstallService:
             package,
             lockfile,
             modules_dir,
-            trust_transitive_self_defined=trust_transitive_mcp,
+            admission=admission,
             logger=logger,
             allow_pending=allow_pending,
             active_package_keys=active_package_keys,
@@ -617,11 +627,14 @@ class InstallService:
         pending = current.pending_servers(lockfile) if allow_pending else frozenset()
         diff = current.diff(lockfile.mcp_configs)
         reasons = [f"  - {problem.package_key}: {problem.message}" for problem in current.problems]
+        consent = current.consent_problems(lockfile)
+        for name, message in consent.items():
+            reasons.append(f"  - MCP server {name!r} is {message}")
         for name in sorted(diff.changed):
             reasons.append(f"  - MCP server {name!r} config differs from apm.lock.yaml")
         for name in sorted(diff.source_only):
             reasons.append(f"  - MCP server {name!r} is missing from apm.lock.yaml")
-        for name in sorted(diff.lock_only - pending):
+        for name in sorted(diff.lock_only - pending - set(consent)):
             reasons.append(f"  - MCP server {name!r} is no longer declared in apm.yml")
         if set(current.configs) | pending != set(lockfile.mcp_servers) and not reasons:
             reasons.append("  - MCP server names in apm.lock.yaml are out of sync with apm.yml")
@@ -633,7 +646,7 @@ class InstallService:
         lockfile: LockFile,
         modules_dir: Path,
         *,
-        trust_transitive_mcp: bool,
+        admission: McpAdmission,
         logger: InstallLogger | None,
         active_package_keys: frozenset[str] | None = None,
     ) -> None:
@@ -644,7 +657,7 @@ class InstallService:
             package,
             lockfile,
             modules_dir,
-            trust_transitive_mcp=trust_transitive_mcp,
+            admission=admission,
             logger=logger,
             allow_pending=False,
             active_package_keys=active_package_keys,
